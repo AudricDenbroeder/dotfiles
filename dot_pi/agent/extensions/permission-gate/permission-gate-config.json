@@ -1,0 +1,12 @@
+{
+  "patterns": [
+    "\\brm\\s+(-rf?|--recursive)\\b",
+    "\\bsudo\\b",
+    "\\b(chmod|chown)\\b.*777\\b"
+  ],
+  "allowlist": [
+    "rm -rf /tmp/my-cache",
+    "/^sudo --version/",
+    "/^rm\\s+.*\\/tmp\\//i"
+  ]
+}

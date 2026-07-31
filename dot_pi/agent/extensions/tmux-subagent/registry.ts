@@ -6,11 +6,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
+import type { Role } from "./roles.js";
 
 export interface SubagentHandle {
 	name: string;
 	paneId: string;
 	mailboxDir: string;
+	role?: Role;
 }
 
 export class Registry {

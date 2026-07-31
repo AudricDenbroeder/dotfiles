@@ -26,6 +26,7 @@ import {
 } from "./registry.js";
 import { writeMailboxPrompt } from "./prompt.js";
 import { waitForFile } from "./polling.js";
+import { ROLES, ROLE_DEFINITIONS, type Role } from "./roles.js";
 
 const registry = new Registry();
 
@@ -46,6 +47,8 @@ function getPiInvocation(extraArgs: string[]): { command: string; args: string[]
 	}
 	return { command: "pi", args: extraArgs };
 }
+
+const ROLE_DESCRIPTIONS_TEXT = ROLES.map((r) => `  - ${r}: ${ROLE_DEFINITIONS[r].description}`).join("\n");
 
 const TmuxAgentParams = Type.Object({
 	action: StringEnum(["spawn", "send", "read", "list", "kill"] as const, {
@@ -69,6 +72,13 @@ const TmuxAgentParams = Type.Object({
 	size: Type.Optional(
 		Type.Number({ description: "Initial size (lines/chars) for the new pane (optional)" }),
 	),
+	role: Type.Optional(
+		StringEnum(ROLES, {
+			description:
+				"Role to assign the sub-agent (spawn only). Determines the role-specific addendum appended to its system prompt. Omit for a generic sub-agent. Available roles:\n" +
+				ROLE_DESCRIPTIONS_TEXT,
+		}),
+	),
 });
 
 const spawnTool = defineTool({
@@ -77,7 +87,9 @@ const spawnTool = defineTool({
 	description:
 		"Spawn and converse with a sub-agent running as a full interactive pi TUI in its own tmux pane.\n" +
 		"Actions: spawn, send, read, list, kill.\n" +
-		"The sub-agent writes its replies to a file mailbox; the parent reads via `read`.",
+		"The sub-agent writes its replies to a file mailbox; the parent reads via `read`.\n" +
+		"Optionally assign a role at spawn time to give the sub-agent a specialized purpose:\n" +
+		ROLE_DESCRIPTIONS_TEXT,
 	parameters: TmuxAgentParams,
 
 	async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -108,7 +120,8 @@ const spawnTool = defineTool({
 			const paneId = await splitWindow({ direction: (params.direction as "right" | "below") | undefined, size: params.size });
 			await setPaneTitle(paneId, name);
 
-			const promptResult = await writeMailboxPrompt(mailboxDir);
+			const role = params.role as Role | undefined;
+			const promptResult = await writeMailboxPrompt(mailboxDir, role);
 			const piArgs = ["--append-system-prompt", promptResult.filePath];
 			const { command, args } = getPiInvocation(piArgs);
 
@@ -119,14 +132,15 @@ const spawnTool = defineTool({
 			await new Promise((r) => setTimeout(r, 100));
 			await sendKey(paneId, "Enter");
 
-			const handle: SubagentHandle = { name, paneId, mailboxDir };
+			const handle: SubagentHandle = { name, paneId, mailboxDir, role };
 			registry.set(handle);
 
+			const roleSuffix = role ? ` (role=${role}: ${ROLE_DEFINITIONS[role].description})` : "";
 			return {
 				content: [
 					{
 						type: "text",
-						text: `Spawned sub-agent "${name}" in pane ${paneId}.\nMailbox: ${mailboxDir}`,
+						text: `Spawned sub-agent "${name}"${roleSuffix} in pane ${paneId}.\nMailbox: ${mailboxDir}`,
 					},
 				],
 				details: { action: "spawn", handle },
@@ -259,7 +273,7 @@ const spawnTool = defineTool({
 			const entries = await Promise.all(
 				handles.map(async (h) => {
 					const alive = await paneExists(h.paneId);
-					return { name: h.name, paneId: h.paneId, mailbox: h.mailboxDir, alive };
+					return { name: h.name, paneId: h.paneId, mailbox: h.mailboxDir, role: h.role, alive };
 				}),
 			);
 			if (entries.length === 0) {
@@ -271,7 +285,8 @@ const spawnTool = defineTool({
 			}
 			const lines = entries.map((e) => {
 				const status = e.alive ? "alive" : "dead";
-				return `  ${e.name} pane=${e.paneId} mailbox=${e.mailbox} [${status}]`;
+				const roleTag = e.role ? ` role=${e.role} (${ROLE_DEFINITIONS[e.role].description})` : "";
+				return `  ${e.name} pane=${e.paneId}${roleTag} mailbox=${e.mailbox} [${status}]`;
 			}).join("\n");
 			return {
 				content: [{ type: "text", text: `Tracked sub-agents:\n${lines}` }],
@@ -329,6 +344,7 @@ const spawnTool = defineTool({
 		let text = theme.fg("toolTitle", theme.bold("tmux_agent ")) + theme.fg("accent", action);
 		if (action === "spawn") {
 			text += theme.fg("muted", ` name=${name}`);
+			if (args.role) text += theme.fg("accent", ` role=${args.role}`);
 			if (args.direction) text += theme.fg("dim", ` dir=${args.direction}`);
 			if (args.size) text += theme.fg("dim", ` size=${args.size}`);
 		} else if (action === "send") {

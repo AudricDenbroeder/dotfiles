@@ -64,6 +64,7 @@ Spawns a new tmux pane running an interactive `pi` TUI instance, assigned a uniq
 - `name` (string, required): Unique identifier for the sub-agent (used in pane title and mailbox path)
 - `direction` (string, optional): `"vertical"` or `"horizontal"`. Default: `"vertical"`
 - `size` (number, optional): Pane size in lines/columns (depends on direction). Default: 50% of current
+- `role` (string, optional): `"planner"` | `"scout"` | `"coder"` | `"reviewer"`. Assigns the sub-agent a specialized purpose (see [Roles](#roles) below). Omit for a generic sub-agent (today's default behavior).
 
 **Example:**
 
@@ -178,6 +179,29 @@ Killed sub-agent "research"
 If the pane is already dead or not found, the action completes successfully without error (idempotent).
 
 ---
+
+## Roles
+
+When spawning, you may optionally pass a `role` to give the sub-agent a specialized system-prompt addendum. Each role has:
+
+- A **description**, surfaced to the *parent* agent (in the tool description and in `list` output) so it knows what each role is for and when to use it.
+- A **prompt** addendum, appended to the sub-agent's own system prompt (after the mailbox protocol instructions, which are always included regardless of role).
+
+| Role | Description |
+|------|--------------|
+| `planner` | Breaks down a goal into a concrete plan/task list. Use when you need upfront decomposition or sequencing before work starts. |
+| `scout` | Explores/investigates the codebase or environment and reports findings without making changes. Use for research, reconnaissance, or gathering context. |
+| `coder` | Implements a well-defined piece of work (writes/edits code). Use once a task is clear and ready to be executed. |
+| `reviewer` | Reviews completed work (code, plans, output) for correctness, quality, and risks. Use after a coder/planner has produced something that needs checking. |
+
+Role definitions live in `roles.ts` as a `Record<Role, RoleDefinition>` — edit the `description`/`prompt` strings there to customize behavior. The current `prompt` values are placeholders (e.g. ``You are a subagent with the role `coder`.``); flesh them out with real role-specific instructions as needed.
+
+Role is stored on the sub-agent's registry entry and shown in `list` output and in the tool-call rendering, e.g.:
+
+```
+Tracked sub-agents:
+  coder-1 pane=%12 role=coder (Implements a well-defined piece of work...) mailbox=/tmp/pi-mailbox/coder-1 [alive]
+```
 
 ## File-Mailbox Protocol
 
@@ -399,6 +423,7 @@ List all sub-agents. Kill the ones that are done.
 | `registry.ts` | In-memory `Registry` class tracking `name → {paneId, mailboxDir}` |
 | `polling.ts` | `waitForFile` utility: polls for file existence with exponential backoff + AbortSignal |
 | `prompt.ts` | Stub for sub-agent system prompt injection (file-mailbox protocol instructions) |
+| `roles.ts` | Role definitions (`planner`/`scout`/`coder`/`reviewer`): parent-facing `description` + sub-agent-facing `prompt` addendum |
 
 ### Design Decisions
 

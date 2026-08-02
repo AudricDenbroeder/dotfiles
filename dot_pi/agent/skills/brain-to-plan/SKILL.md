@@ -63,4 +63,3 @@ Description of the task : <what this task accomplishes>
 - Print the plan to the user
 - Ask for review
 - If adjustments are needed, apply them and re-judge with the user
-- If accepted, propose to continue with the `plan-to-task` skill

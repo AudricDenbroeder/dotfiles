@@ -1,0 +1,8 @@
+[
+  {"id": "01", "name": "manager-history-and-events-api", "status": "TODO", "depends_on": []},
+  {"id": "02", "name": "tree-list-data-model", "status": "TODO", "depends_on": ["01"]},
+  {"id": "03", "name": "floating-subagent-list-component", "status": "TODO", "depends_on": ["02"]},
+  {"id": "04", "name": "fullwindow-detail-component", "status": "TODO", "depends_on": ["01"]},
+  {"id": "05", "name": "command-wiring-and-navigation", "status": "TODO", "depends_on": ["03", "04"]},
+  {"id": "06", "name": "manual-testing-and-polish", "status": "TODO", "depends_on": ["05"]}
+]

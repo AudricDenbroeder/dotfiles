@@ -5,11 +5,24 @@
  * in memory, subscribes to streaming events, and exposes kill/send/list.
  */
 
-import type { AgentSession, AgentSessionEvent, ThinkingLevel } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, AgentSessionEvent, ModelRegistry, ThinkingLevel } from "@earendil-works/pi-coding-agent";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { roles } from "./roles";
 import type { RoleConfig } from "./roles";
+
+/**
+ * `ModelRegistry` (from `ctx.modelRegistry`) wraps a `ModelRuntime` instance in a
+ * private field. There is no public accessor, but `createAgentSession()` accepts a
+ * `modelRuntime` option so a subagent session can share the parent's provider
+ * registrations (e.g. dynamically-registered providers like llama.cpp) and
+ * resolved auth instead of bootstrapping a fresh runtime from disk that knows
+ * nothing about them. We reach into the private field at runtime (TS-only
+ * privacy, not enforced by JS) to extract it.
+ */
+function extractModelRuntime(modelRegistry: ModelRegistry | undefined): unknown {
+	return modelRegistry ? (modelRegistry as unknown as Record<string, unknown>).runtime : undefined;
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -54,6 +67,7 @@ export class SubagentManager {
 		cwd: string,
 		parentModel?: Model<any>,
 		parentThinkingLevel?: ThinkingLevel,
+		parentModelRegistry?: ModelRegistry,
 	): Promise<string | null> {
 		const role = roles.find((r) => r.name === roleName);
 		if (!role) {
@@ -63,6 +77,7 @@ export class SubagentManager {
 
 		const id = `subagent-${this.nextId++}`;
 		const sm = SessionManager.inMemory(cwd);
+		const modelRuntime = extractModelRuntime(parentModelRegistry);
 
 		const { session } = await createAgentSession({
 			cwd,
@@ -70,6 +85,10 @@ export class SubagentManager {
 			tools: role.tools,
 			model: parentModel,
 			thinkingLevel: parentThinkingLevel,
+			// Share the parent's ModelRuntime so dynamically-registered providers
+			// (e.g. llama.cpp) and already-resolved auth are available to the
+			// subagent session instead of bootstrapping a fresh runtime from disk.
+			...(modelRuntime ? { modelRuntime: modelRuntime as never } : {}),
 		});
 
 		const instance: SubagentInstance = {
@@ -125,9 +144,19 @@ export class SubagentManager {
 	}
 
 	/**
-	 * Send an instruction to a subagent. Returns success status and streaming flag.
+	 * Send an instruction to a subagent and wait for its reply.
+	 *
+	 * `session.sendUserMessage()` (via `AgentSession.prompt()`) already awaits the
+	 * full agent turn when the subagent isn't mid-stream, so by the time it
+	 * resolves the subagent's response is present in `session.messages`. We
+	 * additionally `waitForIdle()` to cover the case where the message was queued
+	 * (e.g. a send arrives while a previous turn is still finishing), then extract
+	 * the last assistant message's text so it can be surfaced back to the caller.
 	 */
-	async send(id: string, message: string): Promise<{ success: boolean; streaming?: boolean }> {
+	async send(
+		id: string,
+		message: string,
+	): Promise<{ success: boolean; streaming?: boolean; response?: string }> {
 		const sub = this.subagents.get(id);
 		if (!sub) {
 			return { success: false };
@@ -141,12 +170,39 @@ export class SubagentManager {
 		try {
 			// Use followUp so the message is queued after the current turn
 			await sub.session.sendUserMessage(message, { deliverAs: "followUp" });
-			return { success: true, streaming: sub.session.isStreaming };
+			// Ensure the turn has fully settled (covers the queued/streaming edge case)
+			// before reading back the response.
+			await sub.session.waitForIdle();
+			const response = this.getLastAssistantText(sub);
+			sub.status = "idle";
+			sub.lastActivity = new Date();
+			return { success: true, streaming: sub.session.isStreaming, response };
 		} catch (e) {
 			console.error(`[SubagentManager] Error sending to "${id}":`, e);
 			sub.status = "error";
 			return { success: false };
 		}
+	}
+
+	/**
+	 * Extract the text of the most recent assistant message from a subagent's
+	 * session, used to surface the subagent's reply after `send()`.
+	 */
+	getLastAssistantText(sub: SubagentInstance): string | undefined {
+		const messages = sub.session.messages;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i] as { role?: string; content?: unknown };
+			if (msg?.role !== "assistant") continue;
+			const content = msg.content as Array<{ type: string; text?: string }> | undefined;
+			if (!content) return undefined;
+			const text = content
+				.filter((part) => part.type === "text" && typeof part.text === "string")
+				.map((part) => part.text as string)
+				.join("\n")
+				.trim();
+			return text.length > 0 ? text : undefined;
+		}
+		return undefined;
 	}
 
 	/**

@@ -27,9 +27,9 @@ function validateRoles(): string[] {
 
 const SubagentParams = Type.Object({
 	action: StringEnum(["spawn", "list", "kill", "send"] as const),
-	role: Type.Optional(Type.String({ description: "Role name for spawn action" })),
-	agentId: Type.Optional(Type.String({ description: "Target agent ID for send/kill actions" })),
-	instruction: Type.Optional(Type.String({ description: "Instruction to send to the subagent" })),
+	role: Type.Optional(Type.String({ description: "Role name for spawn (e.g., Scout, Coder, Reviewer)" })),
+	id: Type.Optional(Type.String({ description: "Subagent ID for kill/send" })),
+	message: Type.Optional(Type.String({ description: "Instruction message for send action" })),
 });
 
 // ─── Extension Factory ────────────────────────────────────────────────────────
@@ -57,6 +57,13 @@ export default function (pi: ExtensionAPI) {
 		name: "sdk-subagent",
 		label: "SDK Subagent",
 		description: "Manage subagent instances: spawn, list, kill, send instructions",
+		promptSnippet: "Spawn, list, kill, or send instructions to subagent instances",
+		promptGuidelines: [
+			"Use sdk-subagent to spawn a subagent with a specific role.",
+			"Use sdk-subagent to list active subagents and their status.",
+			"Use sdk-subagent to send instructions to an existing subagent.",
+			"Use sdk-subagent to kill a subagent when done.",
+		],
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -66,84 +73,83 @@ export default function (pi: ExtensionAPI) {
 				case "spawn": {
 					if (!params.role) {
 						return {
-							content: [{ type: "text", text: "spawn requires 'role' parameter" }],
-							details: null,
+							content: [{ type: "text", text: `Error: spawn requires 'role' parameter` }],
+							details: { error: true, message: "spawn requires 'role' parameter" },
 						};
 					}
-					const id = await manager.spawn(params.role, cwd, ctx.model, ctx.thinkingLevel);
+					const id = await manager.spawn(params.role, cwd, ctx.model, ctx.thinkingLevel, ctx.modelRegistry);
 					if (!id) {
 						return {
-							content: [{ type: "text", text: `Role "${params.role}" not found.` }],
-							details: null,
+							content: [{ type: "text", text: `Error: Role "${params.role}" not found.` }],
+							details: { error: true, message: `Role "${params.role}" not found.` },
 						};
 					}
 					return {
-						content: [{ type: "text", text: `Subagent "${id}" spawned with role "${params.role}".` }],
+						content: [{ type: "text", text: `Spawned ${id} with role ${params.role}` }],
 						details: { id, role: params.role, status: "idle" },
 					};
 				}
 				case "list": {
 					const agents = manager.list();
-					if (agents.length === 0) {
-						return {
-							content: [{ type: "text", text: "No active subagents." }],
-							details: [],
-						};
-					}
-					const summary = agents.map((a) => `  ${a.id} [${a.status}] role="${a.role}"`).join("\n");
 					return {
-						content: [{ type: "text", text: `Active subagents (${agents.length}):\n${summary}` }],
-						details: agents,
+						content: [{ type: "text", text: JSON.stringify(agents, null, 2) }],
+						details: { subagents: agents },
 					};
 				}
 				case "kill": {
-					if (!params.agentId) {
+					if (!params.id) {
 						return {
-							content: [{ type: "text", text: "kill requires 'agentId' parameter" }],
-							details: null,
+							content: [{ type: "text", text: `Error: kill requires 'id' parameter` }],
+							details: { error: true, message: "kill requires 'id' parameter" },
 						};
 					}
-					const ok = await manager.kill(params.agentId);
+					const ok = await manager.kill(params.id);
 					if (!ok) {
 						return {
-							content: [{ type: "text", text: `Subagent "${params.agentId}" not found.` }],
-							details: null,
+							content: [{ type: "text", text: `Error: Subagent "${params.id}" not found.` }],
+							details: { error: true, message: `Subagent "${params.id}" not found.` },
 						};
 					}
 					return {
-						content: [{ type: "text", text: `Subagent "${params.agentId}" killed.` }],
-						details: { id: params.agentId, status: "killed" },
+						content: [{ type: "text", text: `Killed ${params.id}` }],
+						details: { success: true, id: params.id },
 					};
 				}
 				case "send": {
-					if (!params.agentId) {
+					if (!params.id) {
 						return {
-							content: [{ type: "text", text: "send requires 'agentId' parameter" }],
-							details: null,
+							content: [{ type: "text", text: `Error: send requires 'id' parameter` }],
+							details: { error: true, message: "send requires 'id' parameter" },
 						};
 					}
-					if (!params.instruction) {
+					if (!params.message) {
 						return {
-							content: [{ type: "text", text: "send requires 'instruction' parameter" }],
-							details: null,
+							content: [{ type: "text", text: `Error: send requires 'message' parameter` }],
+							details: { error: true, message: "send requires 'message' parameter" },
 						};
 					}
-					const result = await manager.send(params.agentId, params.instruction);
+					const result = await manager.send(params.id, params.message);
 					if (!result.success) {
 						return {
-							content: [{ type: "text", text: `Failed to send instruction to "${params.agentId}".` }],
-							details: null,
+							content: [{ type: "text", text: `Error: Failed to send instruction to "${params.id}".` }],
+							details: { error: true, message: `Failed to send instruction to "${params.id}".` },
 						};
 					}
+					const replyText = result.response ?? "(subagent produced no text response)";
 					return {
-						content: [{ type: "text", text: `Instruction sent to "${params.agentId}": ${params.instruction}` }],
-						details: { id: params.agentId, streaming: result.streaming },
+						content: [
+							{
+								type: "text",
+								text: `Sent to ${params.id}\n${replyText}`,
+							},
+						],
+						details: { success: true, id: params.id, streaming: result.streaming },
 					};
 				}
 				default:
 					return {
-						content: [{ type: "text", text: `Unknown action: ${params.action}` }],
-						details: null,
+						content: [{ type: "text", text: `Error: Unknown action: ${params.action}` }],
+						details: { error: true, message: `Unknown action: ${params.action}` },
 					};
 			}
 		},

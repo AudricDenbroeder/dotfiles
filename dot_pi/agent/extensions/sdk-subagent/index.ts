@@ -10,6 +10,8 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { SubagentManager } from "./SubagentManager";
+import { createSubagentListView } from "./SubagentListView";
+import { createSubagentDetailView } from "./SubagentDetailView";
 import { roles } from "./roles";
 
 // ─── Role validation ──────────────────────────────────────────────────────────
@@ -171,11 +173,27 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Command placeholder
+	// Command — open floating subagent list, with drill-down to detail view
 	pi.registerCommand("subagents", {
-		description: "Open subagent management TUI (placeholder)",
+		description: "Open subagent management TUI",
 		handler: async (_args, ctx) => {
-			ctx.ui.notify("Subagent TUI coming soon!", "info");
+			let listResult = await createSubagentListView(manager, ctx);
+			while (listResult.action === "open") {
+				const sub = manager.get(listResult.id);
+				if (!sub) {
+					ctx.ui.notify(`Subagent "${listResult.id}" no longer exists`, "warning");
+					listResult = await createSubagentListView(manager, ctx);
+					continue;
+				}
+				ctx.ui.notify(`Opening subagent "${listResult.id}" (${sub.role.name})`, "info");
+				const detailResult = await createSubagentDetailView(manager, listResult.id, ctx);
+				if (detailResult.action === "killed") {
+					ctx.ui.notify(`Subagent "${detailResult.id}" killed`, "info");
+				}
+				// "back" → loop back to the list
+				listResult = await createSubagentListView(manager, ctx);
+			}
+			// "close" → just return to normal session, no notification needed
 		},
 	});
 }

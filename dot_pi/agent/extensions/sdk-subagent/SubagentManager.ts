@@ -49,6 +49,7 @@ export interface SubagentStatus {
 	role: string;
 	status: "idle" | "running" | "error";
 	createdAt: string;
+	parentId?: string;
 }
 
 export interface SubagentSerialize {
@@ -105,8 +106,12 @@ export class SubagentManager {
 			for (const listener of listeners) {
 				try {
 					listener();
-				} catch (e) {
-					console.warn(`[SubagentManager] Error in onChange listener for "${id}":`, e);
+				} catch {
+					// Swallow listener errors. Never write to stdout/stderr here:
+					// this can fire while the interactive TUI is actively rendering,
+					// and a raw console write races pi-tui's own terminal writes,
+					// corrupting its row bookkeeping (stale/duplicated overlay and
+					// chat content). See notifyListChange() below for the same reason.
 				}
 			}
 		}
@@ -121,8 +126,8 @@ export class SubagentManager {
 		for (const listener of this.listChangeListeners) {
 			try {
 				listener();
-			} catch (e) {
-				console.warn(`[SubagentManager] Error in onListChange listener:`, e);
+			} catch {
+				// Swallow — see notifyChange() above.
 			}
 		}
 	}
@@ -148,7 +153,6 @@ export class SubagentManager {
 	): Promise<string | null> {
 		const role = roles.find((r) => r.name === roleName);
 		if (!role) {
-			console.warn(`[SubagentManager] Role "${roleName}" not found.`);
 			return null;
 		}
 
@@ -181,7 +185,6 @@ export class SubagentManager {
 		this.subscribeToEvents(instance);
 
 		this.subagents.set(id, instance);
-		console.log(`[SubagentManager] Spawned "${id}" with role "${role.name}".`);
 		this.emitChange(id);
 		return id;
 	}
@@ -202,6 +205,7 @@ export class SubagentManager {
 			role: s.role.name,
 			status: s.status,
 			createdAt: s.createdAt.toISOString(),
+			parentId: s.parentId,
 		}));
 	}
 
@@ -214,8 +218,9 @@ export class SubagentManager {
 		try {
 			await sub.session.abort();
 			sub.session.dispose();
-		} catch (e) {
-			console.warn(`[SubagentManager] Error aborting "${id}":`, e);
+		} catch {
+			// Swallow — raw console writes here would race the interactive TUI's
+			// own rendering (see notifyChange() above).
 		}
 		// Clean up per-id listeners
 		this.changeListeners.delete(id);
@@ -226,7 +231,6 @@ export class SubagentManager {
 			this.instanceUnsubscribes.delete(id);
 		}
 		this.subagents.delete(id);
-		console.log(`[SubagentManager] Killed "${id}".`);
 		this.notifyListChange();
 		return true;
 	}
@@ -265,8 +269,10 @@ export class SubagentManager {
 			sub.status = "idle";
 			sub.lastActivity = new Date();
 			return { success: true, streaming: sub.session.isStreaming, response };
-		} catch (e) {
-			console.error(`[SubagentManager] Error sending to "${id}":`, e);
+		} catch {
+			// Swallow — raw console writes here would race the interactive TUI's
+			// own rendering (see notifyChange() above). The caller already gets
+			// `{ success: false }` to signal the failure.
 			sub.status = "error";
 			return { success: false };
 		}
@@ -431,6 +437,71 @@ export class SubagentManager {
 		// Store unsubscribe so we can clean up on kill
 		this.instanceUnsubscribes.set(instance.id, unsubscribe);
 	}
+}
+
+// ─── Tree Data Model ──────────────────────────────────────────────────────────
+
+export interface SubagentTreeRow {
+	id: string;
+	depth: number;
+	prefix: string; // e.g. "│   ├── " matching `tree` command style
+	isLast: boolean; // last child among its siblings
+	instance: SubagentStatus;
+}
+
+/**
+ * Build an ordered tree representation of subagents using parentId links.
+ * Returns rows in DFS preorder (roots first, each node's children follow).
+ * Orphaned nodes (parentId pointing to a non-existent instance) are promoted to root.
+ */
+export function buildSubagentTree(instances: SubagentStatus[]): SubagentTreeRow[] {
+	// Group instances by parentId; orphaned parentIds fall back to undefined (root)
+	const childrenMap = new Map<string | undefined, SubagentStatus[]>();
+	const knownIds = new Set(instances.map((i) => i.id));
+
+	for (const inst of instances) {
+		const parentKey = inst.parentId && knownIds.has(inst.parentId) ? inst.parentId : undefined;
+		if (!childrenMap.has(parentKey)) {
+			childrenMap.set(parentKey, []);
+		}
+		childrenMap.get(parentKey)!.push(inst);
+	}
+
+	const result: SubagentTreeRow[] = [];
+
+	function dfs(nodeId: string, depth: number, ancestorIsLast: boolean[]): void {
+		const node = instances.find((i) => i.id === nodeId);
+		if (!node) return;
+
+		// Find this node's siblings: all children of its parent
+		const parentKey = node.parentId && knownIds.has(node.parentId) ? node.parentId : undefined;
+		const siblingsList = childrenMap.get(parentKey) ?? [];
+		const isLast = siblingsList[siblingsList.length - 1]?.id === nodeId;
+
+		// Build prefix: for each ancestor level, emit "│   " if ancestor was not last, else "    "
+		let prefix = "";
+		for (let i = 0; i < depth; i++) {
+			prefix += ancestorIsLast[i] ? "    " : "│   ";
+		}
+		// Connector for this node
+		prefix += isLast ? "└── " : "├── ";
+
+		result.push({ id: nodeId, depth, prefix, isLast, instance: node });
+
+		// Recurse into children, passing current isLast as the ancestor flag for the next depth
+		const childBucket = childrenMap.get(nodeId) ?? [];
+		for (const child of childBucket) {
+			dfs(child.id, depth + 1, [...ancestorIsLast, isLast]);
+		}
+	}
+
+	// Start DFS from root nodes (those with no parent or orphaned parent)
+	const rootBucket = childrenMap.get(undefined) ?? [];
+	for (const root of rootBucket) {
+		dfs(root.id, 0, []);
+	}
+
+	return result;
 }
 
 // Re-export roles for convenience

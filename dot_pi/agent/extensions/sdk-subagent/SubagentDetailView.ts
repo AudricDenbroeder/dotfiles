@@ -67,7 +67,8 @@ export function createSubagentDetailView(
 				case "assistant":
 					return `  ${fg("accent", "●")} ${bold(fg("accent", "Assistant"))}: ${fg("accent", truncated)}`;
 				case "tool_call":
-					return `  ${fg("muted", "⟳")} ${fg("muted", `${entry.toolName}(${entry.toolCallId ?? ""})`)}`;
+					const argsDisplay = entry.toolArgs ? ` ${entry.toolArgs}` : "";
+					return `  ${fg("muted", "⟳")} ${fg("muted", `${entry.toolName}${argsDisplay}`)}`;
 				case "tool_result":
 					return `  ${fg("dim", "⟲")} ${fg("dim", `${entry.toolName}: ${truncated}`)}`;
 				default:
@@ -157,7 +158,8 @@ export function createSubagentDetailView(
 				// Loader line (shown while running)
 				if (sub.status === "running") {
 					const loaderLine = loader.render(width).join(" ");
-					lines.push(border("│") + pad(`  ${loaderLine}`) + border("│"));
+					const truncated = truncateToWidth(loaderLine, contentW - 2, "…", false);
+					lines.push(border("│") + pad(`  ${truncated}`) + border("│"));
 				}
 
 				// Input box — render with reduced width to leave room for border+prefix

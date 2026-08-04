@@ -31,6 +31,7 @@ export interface SubagentHistoryEntry {
 	text?: string;
 	toolName?: string;
 	toolCallId?: string;
+	toolArgs?: string;
 	timestamp?: number;
 }
 
@@ -344,10 +345,17 @@ export class SubagentManager {
 						if (part.type === "text" && typeof part.text === "string") {
 							entries.push({ kind: "assistant", text: part.text, timestamp });
 						} else if (part.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string") {
+							let toolArgs: string | undefined;
+							if (typeof part.arguments === "string") {
+								toolArgs = part.arguments;
+							} else if (typeof part.arguments === "object" && part.arguments !== null) {
+								toolArgs = JSON.stringify(part.arguments);
+							}
 							entries.push({
 								kind: "tool_call",
 								toolName: part.name,
 								toolCallId: part.id,
+								toolArgs,
 								timestamp,
 							});
 						}

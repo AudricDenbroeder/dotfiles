@@ -8,6 +8,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { Text } from "@earendil-works/pi-tui";
 import { SubagentManager } from "./SubagentManager";
 import { roles } from "./roles";
 
@@ -65,6 +66,21 @@ export default function (pi: ExtensionAPI) {
 			"Use sdk-subagent to kill a subagent when done.",
 		],
 		parameters: SubagentParams,
+		renderCall(args: { action: string; role?: string; id?: string; message?: string }, theme, _context) {
+			const action = args.action;
+			let detail = "";
+			if (action === "spawn" && args.role) {
+				detail = args.role;
+			} else if ((action === "kill" || action === "send") && args.id) {
+				detail = args.id;
+			}
+			const suffix = detail ? ` ${detail}` : "";
+			return new Text(
+				theme.fg("toolTitle", theme.bold("sdk-subagent ")) + theme.fg("muted", action + suffix),
+				0,
+				0,
+			);
+		},
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const cwd = (ctx as unknown as Record<string, unknown>).cwd as string | undefined ?? process.cwd();

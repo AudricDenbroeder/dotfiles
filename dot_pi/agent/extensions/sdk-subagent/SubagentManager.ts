@@ -26,6 +26,14 @@ function extractModelRuntime(modelRegistry: ModelRegistry | undefined): unknown 
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export interface SubagentHistoryEntry {
+	kind: "system" | "user" | "assistant" | "tool_call" | "tool_result";
+	text?: string;
+	toolName?: string;
+	toolCallId?: string;
+	timestamp?: number;
+}
+
 export interface SubagentInstance {
 	id: string;
 	role: RoleConfig;
@@ -33,6 +41,7 @@ export interface SubagentInstance {
 	status: "idle" | "running" | "error";
 	createdAt: Date;
 	lastActivity?: Date;
+	parentId?: string;
 }
 
 export interface SubagentStatus {
@@ -54,6 +63,73 @@ export interface SubagentSerialize {
 export class SubagentManager {
 	private subagents: Map<string, SubagentInstance> = new Map();
 	private nextId = 1;
+	private changeListeners: Map<string, Set<() => void>> = new Map();
+	private listChangeListeners: Set<() => void> = new Set();
+	private instanceUnsubscribes: Map<string, () => void> = new Map();
+
+	/**
+	 * Subscribe to changes on a specific subagent.
+	 * Returns an unsubscribe function.
+	 */
+	onChange(id: string, listener: () => void): () => void {
+		if (!this.changeListeners.has(id)) {
+			this.changeListeners.set(id, new Set());
+		}
+		this.changeListeners.get(id)!.add(listener);
+		return () => {
+			const set = this.changeListeners.get(id);
+			set?.delete(listener);
+			if (set?.size === 0) {
+				this.changeListeners.delete(id);
+			}
+		};
+	}
+
+	/**
+	 * Subscribe to manager-wide list changes (spawn, kill, status transitions).
+	 * Returns an unsubscribe function.
+	 */
+	onListChange(listener: () => void): () => void {
+		this.listChangeListeners.add(listener);
+		return () => {
+			this.listChangeListeners.delete(listener);
+		};
+	}
+
+	/**
+	 * Fire per-id change notifications.
+	 */
+	private notifyChange(id: string): void {
+		const listeners = this.changeListeners.get(id);
+		if (listeners) {
+			for (const listener of listeners) {
+				try {
+					listener();
+				} catch (e) {
+					console.warn(`[SubagentManager] Error in onChange listener for "${id}":`, e);
+				}
+			}
+		}
+		// Also notify manager-wide
+		this.notifyListChange();
+	}
+
+	/**
+	 * Fire manager-wide list change notifications.
+	 */
+	private notifyListChange(): void {
+		for (const listener of this.listChangeListeners) {
+			try {
+				listener();
+			} catch (e) {
+				console.warn(`[SubagentManager] Error in onListChange listener:`, e);
+			}
+		}
+	}
+
+	private emitChange(id: string): void {
+		this.notifyChange(id);
+	}
 
 	/**
 	 * Spawn a new subagent with the given role name.
@@ -68,6 +144,7 @@ export class SubagentManager {
 		parentModel?: Model<any>,
 		parentThinkingLevel?: ThinkingLevel,
 		parentModelRegistry?: ModelRegistry,
+		opts?: { parentId?: string },
 	): Promise<string | null> {
 		const role = roles.find((r) => r.name === roleName);
 		if (!role) {
@@ -97,6 +174,7 @@ export class SubagentManager {
 			session,
 			status: "idle",
 			createdAt: new Date(),
+			parentId: opts?.parentId,
 		};
 
 		// Subscribe to streaming events for this subagent
@@ -104,6 +182,7 @@ export class SubagentManager {
 
 		this.subagents.set(id, instance);
 		console.log(`[SubagentManager] Spawned "${id}" with role "${role.name}".`);
+		this.emitChange(id);
 		return id;
 	}
 
@@ -138,8 +217,17 @@ export class SubagentManager {
 		} catch (e) {
 			console.warn(`[SubagentManager] Error aborting "${id}":`, e);
 		}
+		// Clean up per-id listeners
+		this.changeListeners.delete(id);
+		// Clean up session unsubscribe
+		const unsub = this.instanceUnsubscribes.get(id);
+		if (unsub) {
+			unsub();
+			this.instanceUnsubscribes.delete(id);
+		}
 		this.subagents.delete(id);
 		console.log(`[SubagentManager] Killed "${id}".`);
+		this.notifyListChange();
 		return true;
 	}
 
@@ -206,6 +294,79 @@ export class SubagentManager {
 	}
 
 	/**
+	 * Return the full ordered history for a subagent, including system prompt,
+	 * user messages, assistant text, and tool call/result pairs.
+	 */
+	getHistory(id: string): SubagentHistoryEntry[] {
+		const sub = this.subagents.get(id);
+		if (!sub) return [];
+
+		const entries: SubagentHistoryEntry[] = [];
+
+		// Seed with system prompt if available
+		const systemPrompt = sub.session.systemPrompt;
+		if (systemPrompt) {
+			entries.push({
+				kind: "system",
+				text: systemPrompt,
+				timestamp: Date.now(),
+			});
+		}
+
+		const messages = sub.session.messages;
+		for (const msg of messages) {
+			const role = (msg as { role?: string }).role;
+			const timestamp = (msg as { timestamp?: number }).timestamp;
+
+			if (role === "user") {
+				const content = (msg as { content?: string | Array<{ type: string; text?: string }> }).content;
+				let text: string | undefined;
+				if (typeof content === "string") {
+					text = content;
+				} else if (Array.isArray(content)) {
+					text = content
+						.filter((part) => part.type === "text" && typeof part.text === "string")
+						.map((part) => part.text as string)
+						.join("\n")
+						.trim();
+				}
+				entries.push({ kind: "user", text, timestamp });
+			} else if (role === "assistant") {
+				const content = (msg as { content?: Array<{ type: string; text?: string; id?: string; name?: string; arguments?: Record<string, any> }> }).content;
+				if (Array.isArray(content)) {
+					for (const part of content) {
+						if (part.type === "text" && typeof part.text === "string") {
+							entries.push({ kind: "assistant", text: part.text, timestamp });
+						} else if (part.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string") {
+							entries.push({
+								kind: "tool_call",
+								toolName: part.name,
+								toolCallId: part.id,
+								timestamp,
+							});
+						}
+					}
+				}
+			} else if (role === "toolResult") {
+				const toolCallId = (msg as { toolCallId?: string }).toolCallId;
+				const toolName = (msg as { toolName?: string }).toolName;
+				const content = (msg as { content?: Array<{ type: string; text?: string }> }).content;
+				let text: string | undefined;
+				if (Array.isArray(content)) {
+					text = content
+						.filter((part) => part.type === "text" && typeof part.text === "string")
+						.map((part) => part.text as string)
+						.join("\n")
+						.trim();
+				}
+				entries.push({ kind: "tool_result", text, toolName, toolCallId, timestamp });
+			}
+		}
+
+		return entries;
+	}
+
+	/**
 	 * Poll until the subagent becomes idle again.
 	 */
 	async waitForIdle(id: string): Promise<void> {
@@ -239,6 +400,9 @@ export class SubagentManager {
 	 * Clean up all subagents (called on session shutdown).
 	 */
 	async shutdown(): Promise<void> {
+		// Clean up all listener sets
+		this.changeListeners.clear();
+		this.listChangeListeners.clear();
 		for (const id of [...this.subagents.keys()]) {
 			await this.kill(id);
 		}
@@ -251,15 +415,21 @@ export class SubagentManager {
 			if (event.type === "agent_settled") {
 				instance.status = "idle";
 				instance.lastActivity = new Date();
+				this.notifyChange(instance.id);
 			} else if (event.type === "auto_retry_start" || event.type === "compaction_start") {
 				instance.status = "running";
+				this.notifyChange(instance.id);
 			} else if (event.type === "auto_retry_end" && !event.success) {
 				instance.status = "error";
+				this.notifyChange(instance.id);
+			} else if (event.type === "turn_end" || event.type === "tool_execution_end") {
+				// History changed — notify so the UI can refresh
+				this.notifyChange(instance.id);
 			}
 			// Streaming text deltas are available here but not surfaced yet (task 05)
 		});
-		// Store unsubscribe on the instance so we can clean up on kill
-		(instance as unknown as Record<string, unknown>)._unsubscribe = unsubscribe;
+		// Store unsubscribe so we can clean up on kill
+		this.instanceUnsubscribes.set(instance.id, unsubscribe);
 	}
 }
 

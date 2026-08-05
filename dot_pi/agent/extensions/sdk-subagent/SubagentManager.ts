@@ -219,6 +219,17 @@ export class SubagentManager {
 			...(modelRuntime ? { modelRuntime: modelRuntime as never } : {}),
 		});
 
+		// Append the role's system prompt to the main (built-in) system prompt.
+		// createAgentSession initializes systemPrompt to "" and then _rebuildSystemPrompt
+		// builds the main prompt from tools and resources. We append the role-specific
+		// prompt so the subagent receives both the standard pi context and its role guidance.
+		if (role.systemPrompt) {
+			const mainPrompt = (session as Record<string, unknown>)._baseSystemPrompt as string;
+			const combinedPrompt = mainPrompt + "\n\n--- Role: " + (role.label ?? role.name) + " ---\n\n" + role.systemPrompt;
+			(session as Record<string, unknown>)._baseSystemPrompt = combinedPrompt;
+			session.agent.state.systemPrompt = combinedPrompt;
+		}
+
 		const instance: SubagentInstance = {
 			id,
 			role,

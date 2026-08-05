@@ -12,6 +12,16 @@ import { roles } from "./roles";
 import type { RoleConfig } from "./roles";
 
 /**
+ * Parse a "provider/modelId" string into its components.
+ * Returns undefined for either component if the format is invalid.
+ */
+function parseModelRef(ref: string): { provider: string; modelId: string } | undefined {
+	const idx = ref.indexOf("/");
+	if (idx <= 0 || idx === ref.length - 1) return undefined;
+	return { provider: ref.slice(0, idx), modelId: ref.slice(idx + 1) };
+}
+
+/**
  * `ModelRegistry` (from `ctx.modelRegistry`) wraps a `ModelRuntime` instance in a
  * private field. There is no public accessor, but `createAgentSession()` accepts a
  * `modelRuntime` option so a subagent session can share the parent's provider
@@ -56,6 +66,7 @@ export interface SubagentStatus {
 export interface SubagentSerialize {
 	id: string;
 	role: string;
+	model?: string;
 	status: string;
 	createdAt: string;
 }
@@ -140,9 +151,11 @@ export class SubagentManager {
 	/**
 	 * Spawn a new subagent with the given role name.
 	 * Creates an in-memory SDK AgentSession with the role's toolset.
-	 * Passes parentModel and parentThinkingLevel so the subagent shares
-	 * the parent session's model / API credentials.
-	 * Returns the subagent ID, or null if the role is not found.
+	 * If the role defines a `model` or `thinkingLevel`, those are used instead of
+	 * the parent's values. An explicit `modelOverride` parameter takes precedence
+	 * over the role's default.
+	 * Returns the subagent ID on success, or null if the role is not found or the
+	 * requested model could not be resolved.
 	 */
 	async spawn(
 		roleName: string,
@@ -150,23 +163,56 @@ export class SubagentManager {
 		parentModel?: Model<any>,
 		parentThinkingLevel?: ThinkingLevel,
 		parentModelRegistry?: ModelRegistry,
-		opts?: { parentId?: string },
-	): Promise<string | null> {
+		opts?: { parentId?: string; model?: string },
+	): Promise<{ id: string | null; errorMessage?: string }> {
 		const role = roles.find((r) => r.name === roleName);
 		if (!role) {
-			return null;
+			return { id: null };
 		}
 
 		const id = `subagent-${this.nextId++}`;
 		const sm = SessionManager.inMemory(cwd);
 		const modelRuntime = extractModelRuntime(parentModelRegistry);
 
+		// Resolve model: spawn override > role default > parent model
+		let resolvedModel: Model<any> | undefined;
+		let resolvedThinkingLevel: ThinkingLevel | undefined;
+
+		if (opts?.model) {
+			// Explicit spawn override — look up in the model registry
+			const parsed = parseModelRef(opts.model);
+			if (!parsed) {
+				return { id: null, errorMessage: `Invalid model format "${opts.model}". Expected provider/modelId (e.g. "anthropic/claude-opus-4-5").` };
+			}
+			if (modelRuntime) {
+				resolvedModel = modelRuntime.getModel(parsed.provider, parsed.modelId);
+			}
+			if (!resolvedModel && modelRuntime) {
+				// Model not found — list available models for this provider to help the user
+				const available = modelRuntime.getModels(parsed.provider);
+				const suggestions = available.map((m) => `${parsed.provider}/${m.id}`).join(", ");
+				return { id: null, errorMessage: `Model "${opts.model}" not found. Available models for provider "${parsed.provider}": ${suggestions || "none"}` };
+			}
+			resolvedThinkingLevel = role.thinkingLevel;
+		} else if (role.model) {
+			// Role default model — look up in the model registry
+			const parsed = parseModelRef(role.model);
+			if (parsed && modelRuntime) {
+				resolvedModel = modelRuntime.getModel(parsed.provider, parsed.modelId);
+			}
+			resolvedThinkingLevel = role.thinkingLevel;
+		} else {
+			// Fall back to parent's model and thinking level
+			resolvedModel = parentModel;
+			resolvedThinkingLevel = parentThinkingLevel;
+		}
+
 		const { session } = await createAgentSession({
 			cwd,
 			sessionManager: sm,
 			tools: role.tools,
-			model: parentModel,
-			thinkingLevel: parentThinkingLevel,
+			model: resolvedModel,
+			thinkingLevel: resolvedThinkingLevel,
 			// Share the parent's ModelRuntime so dynamically-registered providers
 			// (e.g. llama.cpp) and already-resolved auth are available to the
 			// subagent session instead of bootstrapping a fresh runtime from disk.
@@ -187,7 +233,7 @@ export class SubagentManager {
 
 		this.subagents.set(id, instance);
 		this.emitChange(id);
-		return id;
+		return { id };
 	}
 
 	/**
@@ -398,6 +444,7 @@ export class SubagentManager {
 		return Array.from(this.subagents.values()).map((s) => ({
 			id: s.id,
 			role: s.role.name,
+			model: s.role.model,
 			status: s.status,
 			createdAt: s.createdAt.toISOString(),
 		}));

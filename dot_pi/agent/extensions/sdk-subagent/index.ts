@@ -30,9 +30,10 @@ function validateRoles(): string[] {
 
 const SubagentParams = Type.Object({
 	action: StringEnum(["spawn", "list", "kill", "send"] as const),
-	role: Type.Optional(Type.String({ description: "Role name for spawn (e.g., Scout, Coder, Reviewer)" })),
+	role: Type.Optional(Type.String({ description: "Role name for spawn (scout | coder | reviewer)" })),
 	id: Type.Optional(Type.String({ description: "Subagent ID for kill/send" })),
 	message: Type.Optional(Type.String({ description: "Instruction message for send action" })),
+	model: Type.Optional(Type.String({ description: "Optional model override in provider/modelId format (e.g. github-copilot/gpt-5-mini). Overrides the role's default model." })),
 });
 
 // ─── Extension Factory ────────────────────────────────────────────────────────
@@ -68,7 +69,7 @@ export default function (pi: ExtensionAPI) {
 			"Use sdk-subagent to kill a subagent when done.",
 		],
 		parameters: SubagentParams,
-		renderCall(args: { action: string; role?: string; id?: string; message?: string }, theme, _context) {
+		renderCall(args: { action: string; role?: string; id?: string; message?: string; model?: string }, theme, _context) {
 			const action = args.action;
 			let detail = "";
 			if (action === "spawn" && args.role) {
@@ -95,16 +96,17 @@ export default function (pi: ExtensionAPI) {
 							details: { error: true, message: "spawn requires 'role' parameter" },
 						};
 					}
-					const id = await manager.spawn(params.role, cwd, ctx.model, ctx.thinkingLevel, ctx.modelRegistry);
-					if (!id) {
+					const spawnResult = await manager.spawn(params.role, cwd, ctx.model, ctx.thinkingLevel, ctx.modelRegistry, params.model ? { model: params.model } : undefined);
+					if (!spawnResult.id) {
+						const errorMsg = spawnResult.errorMessage ?? `Role "${params.role}" not found.`;
 						return {
-							content: [{ type: "text", text: `Error: Role "${params.role}" not found.` }],
-							details: { error: true, message: `Role "${params.role}" not found.` },
+							content: [{ type: "text", text: `Error: ${errorMsg}` }],
+							details: { error: true, message: errorMsg },
 						};
 					}
 					return {
-						content: [{ type: "text", text: `Spawned ${id} with role ${params.role}` }],
-						details: { id, role: params.role, status: "idle" },
+						content: [{ type: "text", text: `Spawned ${spawnResult.id} with role ${params.role}${params.model ? ` (model: ${params.model})` : ''}` }],
+						details: { id: spawnResult.id, role: params.role, model: params.model, status: "idle" },
 					};
 				}
 				case "list": {
@@ -154,11 +156,16 @@ export default function (pi: ExtensionAPI) {
 						};
 					}
 					const replyText = result.response ?? "(subagent produced no text response)";
+					// Truncate instruction if too long (max 80 chars)
+					const maxInstrLen = 80;
+					const instrText = params.message.replace(/\n/g, " ").length > maxInstrLen
+						? `${params.message.replace(/\n/g, " ").slice(0, maxInstrLen)}…`
+						: params.message.replace(/\n/g, " ");
 					return {
 						content: [
 							{
 								type: "text",
-								text: `Sent to ${params.id}\n${replyText}`,
+								text: `▶ Instruction: ${instrText}\n● Answer: ${replyText}`,
 							},
 						],
 						details: { success: true, id: params.id, streaming: result.streaming },

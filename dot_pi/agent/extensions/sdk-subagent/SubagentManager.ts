@@ -8,7 +8,7 @@
 import type { AgentSession, AgentSessionEvent, ModelRegistry, ThinkingLevel } from "@earendil-works/pi-coding-agent";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
-import { roles } from "./roles";
+import { roles, buildSubagentPrompt } from "./roles";
 import type { RoleConfig } from "./roles";
 
 /**
@@ -53,11 +53,13 @@ export interface SubagentInstance {
 	createdAt: Date;
 	lastActivity?: Date;
 	parentId?: string;
+	model?: string; // resolved model ref in provider/modelId format
 }
 
 export interface SubagentStatus {
 	id: string;
 	role: string;
+	model?: string;
 	status: "idle" | "running" | "error";
 	createdAt: string;
 	parentId?: string;
@@ -219,15 +221,16 @@ export class SubagentManager {
 			...(modelRuntime ? { modelRuntime: modelRuntime as never } : {}),
 		});
 
-		// Append the role's system prompt to the main (built-in) system prompt.
-		// createAgentSession initializes systemPrompt to "" and then _rebuildSystemPrompt
-		// builds the main prompt from tools and resources. We append the role-specific
-		// prompt so the subagent receives both the standard pi context and its role guidance.
+		// Build a subagent-specific system prompt by merging core pi context with role guidance.
+		// buildSubagentPrompt extracts tool snippets and guidelines from the session's
+		// tool registry, combines them with Pi documentation paths and the current directory,
+		// and appends the role-specific system prompt. This reuses the building blocks from
+		// pi-coding-agent (config helpers, skill formatting) rather than duplicating
+		// the entire prompt construction logic.
 		if (role.systemPrompt) {
-			const mainPrompt = (session as Record<string, unknown>)._baseSystemPrompt as string;
-			const combinedPrompt = mainPrompt + "\n\n--- Role: " + (role.label ?? role.name) + " ---\n\n" + role.systemPrompt;
-			(session as Record<string, unknown>)._baseSystemPrompt = combinedPrompt;
-			session.agent.state.systemPrompt = combinedPrompt;
+			const subagentPrompt = buildSubagentPrompt(session, role, cwd);
+			(session as Record<string, unknown>)._baseSystemPrompt = subagentPrompt;
+			session.agent.state.systemPrompt = subagentPrompt;
 		}
 
 		const instance: SubagentInstance = {
@@ -237,6 +240,7 @@ export class SubagentManager {
 			status: "idle",
 			createdAt: new Date(),
 			parentId: opts?.parentId,
+			model: resolvedModel.name.split(" \(")[0],
 		};
 
 		// Subscribe to streaming events for this subagent
@@ -261,6 +265,7 @@ export class SubagentManager {
 		return Array.from(this.subagents.values()).map((s) => ({
 			id: s.id,
 			role: s.role.name,
+			model: s.model,
 			status: s.status,
 			createdAt: s.createdAt.toISOString(),
 			parentId: s.parentId,
@@ -455,7 +460,7 @@ export class SubagentManager {
 		return Array.from(this.subagents.values()).map((s) => ({
 			id: s.id,
 			role: s.role.name,
-			model: s.role.model,
+			model: s.model,
 			status: s.status,
 			createdAt: s.createdAt.toISOString(),
 		}));

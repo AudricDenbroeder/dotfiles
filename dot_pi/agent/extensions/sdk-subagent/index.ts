@@ -49,7 +49,7 @@ export default function (pi: ExtensionAPI) {
 	// Lifecycle
 	pi.on("session_start", (_event, ctx) => {
 		const roleNames = roles.map((r) => r.name).join(", ");
-		ctx.ui.notify(`SDK Subagent extension loaded. Roles: ${roleNames}`, "info");
+		// ctx.ui.notify(`SDK Subagent extension loaded. Roles: ${roleNames}`, "info");
 	});
 
 	pi.on("session_shutdown", async () => {

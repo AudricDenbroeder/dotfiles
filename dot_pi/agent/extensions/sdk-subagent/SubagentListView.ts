@@ -106,7 +106,8 @@ class SubagentListOverlay {
 				const row = this.rows[i];
 				if (!row) continue;
 				const isSelected = i === this.selectedIndex;
-				const text = `${row.prefix}${row.instance.id} · ${row.instance.role} · ${row.instance.status}`;
+				const modelDisplay = row.instance.model ? `${row.instance.model}` : "";
+				const text = `${row.prefix}${row.instance.id} · ${row.instance.role} · ${modelDisplay} · ${row.instance.status}`;
 				const prefix = isSelected ? "→ " : "  ";
 				const content = `${prefix}${text}`;
 				lines.push(border("│") + padLine(isSelected ? th.fg("accent", content) : content) + border("│"));

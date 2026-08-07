@@ -10,6 +10,7 @@ import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Component, Input, Loader, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { SubagentManager, type SubagentHistoryEntry } from "./SubagentManager";
 
+
 export type SubagentDetailResult = { action: "back" } | { action: "killed"; id: string };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -142,7 +143,8 @@ export function createSubagentDetailView(
 				const lines: string[] = [];
 				lines.push(border(`╭${"─".repeat(innerW)}╮`));
 				lines.push(border("│") + pad(` ${theme.bold(theme.fg("accent", `Subagent: ${sub.id} (${sub.role.name})`))}`) + border("│"));
-				lines.push(border("│") + pad(` ${theme.fg(getStatusColor(), `Status: ${sub.status}`)}       `) + border("│"));
+				const ctxDisplay = manager.getContextDisplay(agentId) ? ` · ${manager.getContextDisplay(agentId)!}` : "";
+				lines.push(border("│") + pad(` ${theme.fg(getStatusColor(), `Status: ${sub.status}${ctxDisplay}`)}`) + border("│"));
 
 				// History lines — each entry as a single compact line
 				const histLines = buildHistoryLines(entryMaxLen);

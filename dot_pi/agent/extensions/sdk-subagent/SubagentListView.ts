@@ -12,6 +12,7 @@ import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { SubagentManager, buildSubagentTree, type SubagentTreeRow } from "./SubagentManager";
 
+
 export type SubagentListResult =
 	| { action: "open"; id: string }
 	| { action: "close" };
@@ -106,8 +107,9 @@ class SubagentListOverlay {
 				const row = this.rows[i];
 				if (!row) continue;
 				const isSelected = i === this.selectedIndex;
-				const modelDisplay = row.instance.model ? `${row.instance.model}` : "";
-				const text = `${row.prefix}${row.instance.id} · ${row.instance.role} · ${modelDisplay} · ${row.instance.status}`;
+				const modelDisplay = row.instance.model ? row.instance.model : "";
+				const ctxDisplay = this.manager.getContextDisplay(row.instance.id) ? ` ${this.manager.getContextDisplay(row.instance.id)!}` : "";
+				const text = `${row.prefix}${row.instance.id} · ${row.instance.role} · ${modelDisplay}${ctxDisplay} · ${row.instance.status}`;
 				const prefix = isSelected ? "→ " : "  ";
 				const content = `${prefix}${text}`;
 				lines.push(border("│") + padLine(isSelected ? th.fg("accent", content) : content) + border("│"));

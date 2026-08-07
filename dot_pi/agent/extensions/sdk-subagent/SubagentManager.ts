@@ -54,6 +54,7 @@ export interface SubagentInstance {
 	lastActivity?: Date;
 	parentId?: string;
 	model?: string; // resolved model ref in provider/modelId format
+
 }
 
 export interface SubagentStatus {
@@ -240,7 +241,7 @@ export class SubagentManager {
 			status: "idle",
 			createdAt: new Date(),
 			parentId: opts?.parentId,
-			model: resolvedModel.name.split(" \(")[0],
+			model: resolvedModel?.name.split(" \(")[0],
 		};
 
 		// Subscribe to streaming events for this subagent
@@ -451,6 +452,20 @@ export class SubagentManager {
 		await sub.session.waitForIdle();
 		sub.status = "idle";
 		sub.lastActivity = new Date();
+	}
+
+	/**
+	 * Get a formatted context usage string for a subagent (e.g. "12k/128k").
+	 * Reads live usage from the session via getContextUsage().
+	 */
+	getContextDisplay(id: string): string | undefined {
+		const sub = this.subagents.get(id);
+		if (!sub) return undefined;
+		const usage = sub.session.getContextUsage();
+		if (!usage || usage.tokens === null) return undefined;
+		const current = usage.tokens >= 1000 ? `${Math.round(usage.tokens / 1000)}k` : String(usage.tokens);
+		const max = usage.contextWindow >= 1000 ? `${Math.round(usage.contextWindow / 1000)}k` : String(usage.contextWindow);
+		return `${current}/${max}`;
 	}
 
 	/**

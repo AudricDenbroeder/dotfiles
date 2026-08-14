@@ -1,7 +1,11 @@
 /**
- * SubagentDetailView — full-window (non-overlay) detail view for a single
- * subagent. Shows the complete conversation history, a live status indicator,
- * and a prompt input box pinned to the bottom.
+ * SubagentDetailView — bordered overlay detail view for a single subagent.
+ * Shows the complete conversation history (scrollable), a live status
+ * indicator, and a prompt input box pinned to the bottom.
+ *
+ * Rendered as a `{ overlay: true }` component with a `maxHeight` bound so it
+ * can never grow past the terminal viewport — content that doesn't fit is
+ * scrolled (↑↓ / PageUp / PageDown), not clipped off-screen.
  *
  * Press k to kill the subagent. Press Esc to return to the list.
  */
@@ -20,7 +24,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 /**
- * Show the full-window subagent detail view. Resolves when the user presses
+ * Show the subagent detail overlay. Resolves when the user presses
  * Esc (→ `{ action: "back" }`) or kills the subagent (→ `{ action: "killed", id }`).
  */
 export function createSubagentDetailView(
@@ -28,7 +32,8 @@ export function createSubagentDetailView(
 	agentId: string,
 	ctx: ExtensionContext,
 ): Promise<SubagentDetailResult> {
-	return ctx.ui.custom<SubagentDetailResult>((tui, theme, _keybindings, done) => {
+	return ctx.ui.custom<SubagentDetailResult>(
+		(tui, theme, _keybindings, done) => {
 		const sub = manager.get(agentId);
 		if (!sub) {
 			done({ action: "back" });
@@ -40,6 +45,18 @@ export function createSubagentDetailView(
 		});
 
 		let isKilled = false;
+
+		// ─── History scrolling ───────────────────────────────────────────────────
+
+		// `scrollOffset` is the index of the first visible history line.
+		// `followBottom` keeps the view pinned to the newest content until the
+		// user manually scrolls up, at which point auto-follow is disabled until
+		// they scroll back down to the bottom (or press End).
+		let scrollOffset = 0;
+		let followBottom = true;
+		// Updated on every render(); used by handleInput to page up/down by the
+		// same number of lines that are actually visible.
+		let lastVisibleHistoryLines = 1;
 
 		// ─── Loader (must be declared before sendInstruction references it) ─────
 
@@ -87,6 +104,12 @@ export function createSubagentDetailView(
 				}
 			}
 			return lines;
+		}
+
+		function scrollBy(delta: number, totalLines: number, visibleLines: number): void {
+			const maxOffset = Math.max(0, totalLines - visibleLines);
+			scrollOffset = Math.max(0, Math.min(maxOffset, scrollOffset + delta));
+			followBottom = scrollOffset >= maxOffset;
 		}
 
 		// ─── Input box ─────────────────────────────────────────────────────────
@@ -146,14 +169,57 @@ export function createSubagentDetailView(
 				const ctxDisplay = manager.getContextDisplay(agentId) ? ` · ${manager.getContextDisplay(agentId)!}` : "";
 				lines.push(border("│") + pad(` ${theme.fg(getStatusColor(), `Status: ${sub.status}${ctxDisplay}`)}`) + border("│"));
 
-				// History lines — each entry as a single compact line
+				// History lines — each entry as a single compact line, clipped to the
+				// visible viewport height so the box never grows past the terminal.
 				const histLines = buildHistoryLines(entryMaxLen);
+
+				// Lines rendered outside the scrollable history area (top border,
+				// title, status, loader, input, help line, bottom border).
+				const nonHistoryLines =
+					4 + // top border + title + status + bottom border
+					1 + // help line
+					(sub.status === "running" ? 1 : 0) +
+					input.render(Math.max(1, innerW - 6)).length;
+				// Match the overlay's `maxHeight: "90%"` budget (see overlayOptions
+				// below) so our own history-window calculation lines up with what
+				// the TUI will actually let this overlay occupy. The TUI still clips
+				// as a hard safety net if this estimate is ever slightly too high.
+				const terminalRows = Math.floor((tui.terminal?.rows ?? 24) * 0.9);
+				// Reserve 2 extra lines for the "N more above/below" scroll
+				// indicators, since they may both be shown at once and are not part
+				// of `nonHistoryLines`. This keeps the box's total height bounded
+				// even in the worst case (scrolled to the middle of a long history).
+				const maxVisible = Math.max(3, terminalRows - nonHistoryLines - 2);
+				lastVisibleHistoryLines = maxVisible;
+
+				const maxOffset = Math.max(0, histLines.length - maxVisible);
+				if (followBottom) {
+					scrollOffset = maxOffset;
+				} else {
+					scrollOffset = Math.max(0, Math.min(maxOffset, scrollOffset));
+				}
+
+				const visibleHistLines = histLines.slice(scrollOffset, scrollOffset + maxVisible);
+
 				if (histLines.length === 0) {
 					lines.push(border("│") + pad("  No history yet") + border("│"));
 				} else {
-					for (const line of histLines) {
+					if (scrollOffset > 0) {
+						lines.push(
+							border("│") +
+								pad(`  ${theme.fg("dim", `▲ ${scrollOffset} more above`)}`) +
+								border("│"),
+						);
+					}
+					for (const line of visibleHistLines) {
 						const truncated = truncateToWidth(line, contentW - 2, "…", false);
 						lines.push(border("│") + pad(`  ${truncated}`) + border("│"));
+					}
+					const below = histLines.length - (scrollOffset + visibleHistLines.length);
+					if (below > 0) {
+						lines.push(
+							border("│") + pad(`  ${theme.fg("dim", `▼ ${below} more below`)}`) + border("│"),
+						);
 					}
 				}
 
@@ -173,12 +239,49 @@ export function createSubagentDetailView(
 					lines.push(border("│") + pad(`  ${truncated}`) + border("│"));
 				}
 
-				lines.push(border("│") + pad(` ${theme.fg("dim", "k kill • esc back")}`) + border("│"));
+				const scrollHint =
+					histLines.length > maxVisible ? " • ↑↓/PgUp/PgDn scroll • End: bottom" : "";
+				lines.push(
+					border("│") +
+						pad(` ${theme.fg("dim", `k kill • esc back${scrollHint}`)}`) +
+						border("│"),
+				);
 				lines.push(border(`╰${"─".repeat(innerW)}╯`));
 				return lines;
 			},
 
 			handleInput(data: string): void {
+				if (matchesKey(data, "up")) {
+					scrollBy(-1, manager.getHistory(agentId).length, lastVisibleHistoryLines);
+					tui.requestRender();
+					return;
+				}
+				if (matchesKey(data, "down")) {
+					scrollBy(1, manager.getHistory(agentId).length, lastVisibleHistoryLines);
+					tui.requestRender();
+					return;
+				}
+				if (matchesKey(data, "pageup")) {
+					scrollBy(-lastVisibleHistoryLines, manager.getHistory(agentId).length, lastVisibleHistoryLines);
+					tui.requestRender();
+					return;
+				}
+				if (matchesKey(data, "pagedown")) {
+					scrollBy(lastVisibleHistoryLines, manager.getHistory(agentId).length, lastVisibleHistoryLines);
+					tui.requestRender();
+					return;
+				}
+				if (matchesKey(data, "end")) {
+					followBottom = true;
+					tui.requestRender();
+					return;
+				}
+				if (matchesKey(data, "home")) {
+					scrollOffset = 0;
+					followBottom = false;
+					tui.requestRender();
+					return;
+				}
 				if (matchesKey(data, "k")) {
 					isKilled = true;
 					unsubChange();
@@ -209,5 +312,14 @@ export function createSubagentDetailView(
 		};
 
 		return component;
-	});
+		},
+		{
+			overlay: true,
+			// Bound the overlay to the terminal size so it can never grow past the
+			// visible viewport; the component itself also clips history lines to
+			// this same budget (see `maxVisible` in render()) so the box always
+			// fits and the bottom (input box / help line) stays on screen.
+			overlayOptions: { anchor: "center", width: "90%", minWidth: 60, maxHeight: "90%" },
+		},
+	);
 }

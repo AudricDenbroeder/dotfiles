@@ -243,7 +243,7 @@ export function createSubagentDetailView(
 					histLines.length > maxVisible ? " • ↑↓/PgUp/PgDn scroll • End: bottom" : "";
 				lines.push(
 					border("│") +
-						pad(` ${theme.fg("dim", `k kill • esc back${scrollHint}`)}`) +
+						pad(` ${theme.fg("dim", `ctrl+k kill • esc back${scrollHint}`)}`) +
 						border("│"),
 				);
 				lines.push(border(`╰${"─".repeat(innerW)}╯`));
@@ -282,7 +282,7 @@ export function createSubagentDetailView(
 					tui.requestRender();
 					return;
 				}
-				if (matchesKey(data, "k")) {
+				if (matchesKey(data, "ctrl+k")) {
 					isKilled = true;
 					unsubChange();
 					loader.stop();

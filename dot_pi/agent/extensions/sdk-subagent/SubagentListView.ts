@@ -67,7 +67,7 @@ class SubagentListOverlay {
 				if (row) this.done({ action: "open", id: row.id });
 				return;
 			}
-			if (matchesKey(data, "k")) {
+			if (matchesKey(data, "ctrl+k")) {
 				const row = this.rows[this.selectedIndex];
 				if (row) {
 					this.manager.kill(row.id).catch(() => {
@@ -126,7 +126,7 @@ class SubagentListOverlay {
 
 		lines.push(
 			border("│") +
-				padLine(` ${th.fg("dim", "↑↓ navigate • enter open • k kill • esc close")}`) +
+				padLine(` ${th.fg("dim", "↑↓ navigate • enter open • ctrl+k kill • esc close")}`) +
 				border("│"),
 		);
 		lines.push(border(`╰${"─".repeat(innerW)}╯`));

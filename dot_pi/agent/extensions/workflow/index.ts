@@ -7,7 +7,7 @@
  * 3. If missing sections, asks the agent to correct it
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -28,13 +28,25 @@ Description of the task : <what this task accomplishes>`;
 const REQUIRED_SECTIONS = ["## Plan", "## Tasks"];
 
 function validatePlan(content: string): string[] {
-  const missing: string[] = [];
+  const issues: string[] = [];
+
+  // Check required sections are present
   for (const section of REQUIRED_SECTIONS) {
     if (!content.includes(section)) {
-      missing.push(section);
+      issues.push(`missing required section: ${section}`);
     }
   }
-  return missing;
+
+  // Check for unexpected top-level sections (## ...)
+  const headerRegex = /^##\s+\S.+$/gm;
+  const headers = content.match(headerRegex) ?? [];
+  const allowedHeaders = REQUIRED_SECTIONS;
+  const unexpected = headers.filter(h => !allowedHeaders.includes(h));
+  if (unexpected.length > 0) {
+    issues.push(`unexpected sections: ${unexpected.join(", ")}`);
+  }
+
+  return issues;
 }
 
 function getPlanPath(cwd: string, planName: string): string {
@@ -49,14 +61,29 @@ function readPlan(planPath: string): string | null {
   }
 }
 
+function findLatestPlan(ctx: ExtensionContext): string | null {
+  const plansDir = path.join(ctx.cwd, ".plans", "ACTIVE");
+  if (!fs.existsSync(plansDir)) return null;
+
+  const subdirs = fs
+    .readdirSync(plansDir, { withFileTypes: true })
+    .filter(d => d.isDirectory())
+    .map(d => d.name);
+
+  const planFiles = subdirs
+    .map(dir => path.join(plansDir, dir, "PLAN.md"))
+    .filter(p => fs.existsSync(p));
+
+  return planFiles.length > 0 ? planFiles[planFiles.length - 1] : null;
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("workflow", {
     description: "Manage project workflows (usage: /workflow plan <topic>)",
     getArgumentCompletions: (prefix: string) => {
-      if (prefix.startsWith("plan")) {
-        return [{ value: "plan", label: "plan" }];
-      }
-      return null;
+      const subcommands = ["plan"];
+      const filtered = subcommands.filter((s) => s.startsWith(prefix));
+      return filtered.length > 0 ? filtered.map((s) => ({ value: s, label: s })) : null;
     },
     handler: async (args, ctx) => {
       const subcommand = args.trim().split(/\s+/)[0];
@@ -66,6 +93,8 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("Usage: /workflow plan <topic>", "error");
         return;
       }
+
+      const planName = topic.replace(/\s+/g, "-").toLowerCase();
 
       // Ask the agent to write the plan
       const prompt = `Takes a vague user idea, goal, or project and produces a structured high-level plan. Uses the \`interview\` skill to clarify requirements before writing the plan.
@@ -115,54 +144,35 @@ ${PLAN_TEMPLATE}
       // Send the instruction to the agent
       pi.sendUserMessage(prompt, { expandPromptTemplates: true });
 
-      // Wait for the agent to finish writing
-      await ctx.waitForIdle();
+      // Persistent listener — registers once, fires on every agent_settled
+      pi.on("agent_settled", (_event, settledCtx: ExtensionContext) => {
+        const planPath =
+          findLatestPlan(settledCtx) ??
+          getPlanPath(settledCtx.cwd, planName);
 
-      // Find the plan file - check if agent told us the path or search for it
-      let planPath = getPlanPath(ctx.cwd, topic.replace(/\s+/g, "-").toLowerCase());
-      
-      // If the exact path doesn't exist, search for PLAN.md in .plans/ACTIVE/
-      if (!fs.existsSync(planPath)) {
-        const plansDir = path.join(ctx.cwd, ".plans", "ACTIVE");
-        if (fs.existsSync(plansDir)) {
-          const subdirs = fs.readdirSync(plansDir, { withFileTypes: true })
-            .filter(d => d.isDirectory())
-            .map(d => d.name);
-          
-          // Look for PLAN-*.PLAN.md or just PLAN.md
-          const planFiles = subdirs
-            .map(dir => path.join(plansDir, dir, "PLAN.md"))
-            .filter(p => fs.existsSync(p));
-          
-          if (planFiles.length > 0) {
-            planPath = planFiles[planFiles.length - 1]; // Use the most recently created
-          }
+        const planContent = readPlan(planPath);
+        if (!planContent) {
+          settledCtx.ui.notify("Plan file not found. The agent may not have written it.", "warning");
+          return;
         }
-      }
 
-      // Read and validate the plan
-      const planContent = readPlan(planPath);
-      if (!planContent) {
-        ctx.ui.notify("Plan file not found. The agent may not have written it.", "warning");
-        return;
-      }
+        const issues = validatePlan(planContent);
+        if (issues.length > 0) {
+          const correctionPrompt = `The plan at ${planPath} has issues: ${issues.join(", ")}.
 
-      const missing = validatePlan(planContent);
-      if (missing.length > 0) {
-        // Ask the agent to correct the plan
-        const correctionPrompt = `The plan at ${planPath} is missing required sections: ${missing.join(", ")}.
-
-Please update the plan to include all required sections from this template:
+Please update the plan to match this template:
 
 ${PLAN_TEMPLATE}
 
-Make sure to keep the existing content where appropriate and add any missing sections.`;
+Make sure to keep the existing content where appropriate and fix any issues.`;
 
-        pi.sendUserMessage(correctionPrompt, { deliverAs: "followUp" });
-        ctx.ui.notify(`Plan missing sections: ${missing.join(", ")}. Asking agent to correct...`, "warning");
-      } else {
-        ctx.ui.notify(`Plan validated successfully at ${planPath}`, "info");
-      }
+          pi.sendUserMessage(correctionPrompt, { deliverAs: "followUp" });
+          settledCtx.ui.notify(`Plan issues: ${issues.join(", ")}. Asking agent to correct...`, "warning");
+          return;
+        }
+
+        settledCtx.ui.notify(`Plan validated successfully at ${planPath}`, "info");
+      });
     },
   });
 }

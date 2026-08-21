@@ -26,6 +26,24 @@ Difficulty to implement : <1-5>
 Description of the task : <what this task accomplishes>`;
 
 const REQUIRED_SECTIONS = ["## Plan", "## Tasks"];
+const REQUIRED_TASK_SECTIONS = ["## Task:", "### Overview", "### Subtasks", "### Implementation Details", "### Acceptance Criteria"];
+
+const TASK_TEMPLATE = `## Task: <Task Name>
+
+### Overview
+<Brief description>
+
+### Subtasks
+- [ ] <Subtask 1>
+- [ ] <Subtask 2>
+- [ ] ...
+
+### Implementation Details
+<Files to create/modify, technical decisions, code patterns>
+
+### Acceptance Criteria
+- [ ] <Criterion 1>
+- [ ] <Criterion 2>`;
 
 function validatePlan(content: string): string[] {
   const issues: string[] = [];
@@ -42,6 +60,25 @@ function validatePlan(content: string): string[] {
   const headers = content.match(headerRegex) ?? [];
   const allowedHeaders = REQUIRED_SECTIONS;
   const unexpected = headers.filter(h => !allowedHeaders.includes(h));
+  if (unexpected.length > 0) {
+    issues.push(`unexpected sections: ${unexpected.join(", ")}`);
+  }
+
+  return issues;
+}
+
+function validateTask(content: string): string[] {
+  const issues: string[] = [];
+
+  for (const section of REQUIRED_TASK_SECTIONS) {
+    if (!content.includes(section)) {
+      issues.push(`missing required section: ${section}`);
+    }
+  }
+
+  const headerRegex = /^##\s+\S.+$/gm;
+  const headers = content.match(headerRegex) ?? [];
+  const unexpected = headers.filter(h => !REQUIRED_TASK_SECTIONS.some(s => h.startsWith(s)));
   if (unexpected.length > 0) {
     issues.push(`unexpected sections: ${unexpected.join(", ")}`);
   }
@@ -81,13 +118,148 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("workflow", {
     description: "Manage project workflows (usage: /workflow plan <topic>)",
     getArgumentCompletions: (prefix: string) => {
-      const subcommands = ["plan"];
+      const subcommands = ["plan", "task"];
       const filtered = subcommands.filter((s) => s.startsWith(prefix));
       return filtered.length > 0 ? filtered.map((s) => ({ value: s, label: s })) : null;
     },
     handler: async (args, ctx) => {
       const subcommand = args.trim().split(/\s+/)[0];
       const topic = args.trim().slice(subcommand.length).trim();
+
+      if (subcommand === "task") {
+        const planArg = args.trim().slice(subcommand.length).trim();
+
+        let planPath: string | null = null;
+        if (planArg) {
+          // Try as absolute/relative path first, then as plan name
+          const resolved = path.resolve(ctx.cwd, planArg);
+          if (fs.existsSync(resolved)) {
+            planPath = resolved;
+          } else {
+            // Try as a plan name
+            planPath = getPlanPath(ctx.cwd, planArg);
+            if (!fs.existsSync(planPath)) {
+              // Fall back to latest plan
+              planPath = findLatestPlan(ctx);
+            }
+          }
+        } else {
+          planPath = findLatestPlan(ctx);
+        }
+
+        if (!planPath || !fs.existsSync(planPath)) {
+          ctx.ui.notify("Usage: /workflow task [<plan_path_or_name>] — no plan found", "error");
+          return;
+        }
+
+        const planContent = fs.readFileSync(planPath, "utf-8");
+        const planIssues = validatePlan(planContent);
+        if (planIssues.length > 0) {
+          ctx.ui.notify(`Plan validation failed before task decomposition: ${planIssues.join(", ")}`, "error");
+          return;
+        }
+
+        // Extract plan dir from plan path
+        const planDir = path.dirname(planPath);
+
+        // Extract task info from the plan
+        const taskRegex = /###\s+(\d+-[\w-]+)[^\n]*\n.*?Difficulty to implement\s*:\s*(\d+)[^\n]*\n.*?Description of the task\s*:\s*([^\n]+)/gms;
+        const planTasks: Array<{ id: string; difficulty: number; description: string }> = [];
+        let match;
+        while ((match = taskRegex.exec(planContent)) !== null) {
+          planTasks.push({ id: match[1], difficulty: parseInt(match[2], 10), description: match[3].trim() });
+        }
+
+        if (planTasks.length === 0) {
+          ctx.ui.notify("No tasks found in plan. Cannot decompose.", "error");
+          return;
+        }
+
+        const taskFiles = planTasks.map(t => path.join(planDir, `${t.id}.md`));
+        const manifestPath = path.join(planDir, "TASKS.json");
+        const manifest: Array<{ id: string; name: string; status: string; depends_on: string[] }> = planTasks.map(t => ({
+          id: t.id,
+          name: t.id.split("-")[1] ?? t.id,
+          status: "TODO",
+          depends_on: []
+        }));
+        for (let i = 1; i < manifest.length; i++) {
+          manifest[i].depends_on = [manifest[i - 1].id];
+        }
+
+        const prompt = `You are decomposing a high-level project plan into detailed, actionable tasks.
+
+Plan file: ${planPath}
+Plan directory: ${planDir}
+
+Plan tasks:
+${planTasks.map(t => `  - ${t.id} (difficulty ${t.difficulty}): ${t.description}`).join("\n")}
+
+For each high-level task, create a detailed task file in the same directory as the plan.
+Use this exact template:
+
+${TASK_TEMPLATE}
+
+Rules:
+- One task file per plan task, named like {planDir}/01-task-name.md
+- Break each plan task into 2–4 concrete subtasks (checkboxes)
+- Each subtask represents 15–60 minutes of focused work; merge subtasks under 10 minutes
+- List specific files to create/modify
+- Include technical decisions and code patterns
+- Write clear acceptance criteria (checkboxes)
+- Write all task files in a single batch of tool calls (no reading back)
+- Then create {manifestPath} with this JSON format:
+
+${JSON.stringify(manifest, null, 2)}
+
+- Skip trivial/atomic tasks that need no decomposition; report which were skipped and why
+- Order tasks by dependency and difficulty (easier first, unless dependencies require otherwise)`;
+
+        pi.sendUserMessage(prompt, { expandPromptTemplates: true });
+
+        pi.on("agent_settled", (_event, settledCtx: ExtensionContext) => {
+          // Validate all task files
+          const existingFiles = taskFiles.filter(f => fs.existsSync(f));
+          if (existingFiles.length === 0) {
+            settledCtx.ui.notify("No task files found. The agent may not have written them.", "warning");
+            return;
+          }
+
+          const issues: string[] = [];
+          for (const taskFile of existingFiles) {
+            const content = fs.readFileSync(taskFile, "utf-8");
+            const fileIssues = validateTask(content);
+            if (fileIssues.length > 0) {
+              issues.push(`${path.basename(taskFile)}: ${fileIssues.join(", ")}`);
+            }
+          }
+
+          if (issues.length > 0) {
+            const correctionPrompt = `Some task files have issues:
+${issues.join("\n")}
+
+Please update each affected file to match this template:
+
+${TASK_TEMPLATE}
+
+Make sure to keep the existing content where appropriate and fix any issues.`;
+
+            pi.sendUserMessage(correctionPrompt, { deliverAs: "followUp" });
+            settledCtx.ui.notify(`Task issues found: ${issues.join(", ")}. Asking agent to correct...`, "warning");
+            return;
+          }
+
+          // Check manifest exists
+          if (!fs.existsSync(manifestPath)) {
+            settledCtx.ui.notify(`TASKS.json not found at ${manifestPath}. The agent may not have written it.`, "warning");
+            return;
+          }
+
+          settledCtx.ui.notify(`All ${existingFiles.length} tasks validated successfully in ${planDir}`, "info");
+        });
+
+        return;
+      }
 
       if (subcommand !== "plan" || !topic) {
         ctx.ui.notify("Usage: /workflow plan <topic>", "error");

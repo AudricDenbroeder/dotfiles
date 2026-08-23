@@ -48,9 +48,10 @@ const TASK_TEMPLATE = `## Task: <Task Name>
 function validatePlan(content: string): string[] {
   const issues: string[] = [];
 
-  // Check required sections are present
+  // Check required sections are present at the start of a line
   for (const section of REQUIRED_SECTIONS) {
-    if (!content.includes(section)) {
+    const sectionRegex = new RegExp(`^${section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "m");
+    if (!sectionRegex.test(content)) {
       issues.push(`missing required section: ${section}`);
     }
   }
@@ -70,8 +71,10 @@ function validatePlan(content: string): string[] {
 function validateTask(content: string): string[] {
   const issues: string[] = [];
 
+  // Check required sections are present at the start of a line
   for (const section of REQUIRED_TASK_SECTIONS) {
-    if (!content.includes(section)) {
+    const sectionRegex = new RegExp(`^${section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "m");
+    if (!sectionRegex.test(content)) {
       issues.push(`missing required section: ${section}`);
     }
   }
@@ -179,7 +182,6 @@ export default function (pi: ExtensionAPI) {
         const manifestPath = path.join(planDir, "TASKS.json");
         const manifest: Array<{ id: string; name: string; status: string; depends_on: string[] }> = planTasks.map(t => ({
           id: t.id,
-          name: t.id.split("-")[1] ?? t.id,
           status: "TODO",
           depends_on: []
         }));
@@ -208,7 +210,7 @@ Rules:
 - Include technical decisions and code patterns
 - Write clear acceptance criteria (checkboxes)
 - Write all task files in a single batch of tool calls (no reading back)
-- Then create {manifestPath} with this JSON format:
+- Then create {manifestPath}/TASKS.json with this JSON format:
 
 ${JSON.stringify(manifest, null, 2)}
 
@@ -251,6 +253,8 @@ Make sure to keep the existing content where appropriate and fix any issues.`;
 
           // Check manifest exists
           if (!fs.existsSync(manifestPath)) {
+            const correctionPrompt = `TASKS.json not found at ${manifestPath}`;
+            pi.sendUserMessage(correctionPrompt, { deliverAs: "followUp" });
             settledCtx.ui.notify(`TASKS.json not found at ${manifestPath}. The agent may not have written it.`, "warning");
             return;
           }

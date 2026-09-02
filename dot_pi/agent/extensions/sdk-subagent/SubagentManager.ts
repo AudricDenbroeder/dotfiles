@@ -593,3 +593,37 @@ export function buildSubagentTree(instances: SubagentStatus[]): SubagentTreeRow[
 // Re-export roles for convenience
 export { roles } from "./roles";
 export type { RoleConfig } from "./roles";
+
+// ─── Shared singleton ─────────────────────────────────────────────────────────
+
+/**
+ * Multiple extensions (e.g. `sdk-subagent` and `workflow`) spawn and manage
+ * subagents. They must share one `SubagentManager` instance so that
+ * subagents spawned by one extension (e.g. `/workflow implement_next_task`)
+ * are visible and controllable from the other's UI (e.g. `/subagents`).
+ *
+ * pi's extension loader gives each extension file its own `jiti` instance
+ * with `moduleCache: false` (see `dist/core/extensions/loader.js`), so every
+ * relative import of this module is re-transpiled and re-evaluated from
+ * scratch per extension — a plain module-level `let` here is NOT shared
+ * across extension files, even though they resolve to the same source path.
+ * Only the actual Node process (and therefore `globalThis`) is shared, so we
+ * stash the instance there instead. This is an intentional workaround for
+ * that isolation, not an officially documented pi API — if a future pi
+ * version exposes real cross-extension state sharing, prefer that instead.
+ */
+const GLOBAL_KEY = "__pi_shared_subagent_manager__";
+
+interface GlobalWithSharedManager {
+	__pi_shared_subagent_manager__?: SubagentManager;
+}
+
+export function getSharedSubagentManager(): SubagentManager {
+	const g = globalThis as typeof globalThis & GlobalWithSharedManager;
+	if (!g[GLOBAL_KEY]) {
+		g[GLOBAL_KEY] = new SubagentManager();
+	}
+	return g[GLOBAL_KEY];
+}
+
+

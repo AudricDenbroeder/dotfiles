@@ -9,7 +9,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
-import { SubagentManager } from "./SubagentManager";
+import { getSharedSubagentManager } from "./SubagentManager";
 import { createSubagentListView } from "./SubagentListView";
 import { createSubagentDetailView } from "./SubagentDetailView";
 import { roles } from "./roles";
@@ -44,7 +44,9 @@ export default function (pi: ExtensionAPI) {
 	for (const w of warnings) console.warn(w);
 
 	// Create the manager — lives for the duration of the extension session
-	const manager = new SubagentManager();
+	// Shared across extensions (see getSharedSubagentManager) so subagents
+	// spawned elsewhere (e.g. /workflow implement_next_task) show up here too.
+	const manager = getSharedSubagentManager();
 
 	// Lifecycle
 	pi.on("session_start", (_event, ctx) => {

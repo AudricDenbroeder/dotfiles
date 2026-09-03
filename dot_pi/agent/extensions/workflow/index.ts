@@ -145,6 +145,27 @@ function findLatestPlan(ctx: ExtensionContext): string | null {
   return fs.existsSync(planPath) ? planPath : null;
 }
 
+/**
+ * Build the model picker's option list, mirroring the built-in /model selector:
+ * scoped models (from --models / enabledModels) when scoping is configured,
+ * otherwise the full available catalogue. Each option is a "provider/modelId"
+ * ref (the format subagentManager.spawn() expects). Sorted with the current
+ * session model first, then alphabetically by provider, then by model id.
+ */
+function modelPickerOptions(ctx: ExtensionContext): string[] {
+  const scopedModels = ctx.scopedModels.map((s) => s.model);
+  const models = scopedModels.length > 0 ? scopedModels : ctx.modelRegistry.getAvailable();
+  const current = ctx.model;
+  return [...models]
+    .sort((a, b) => {
+      const aIsCurrent = current ? a.provider === current.provider && a.id === current.id : false;
+      const bIsCurrent = current ? b.provider === current.provider && b.id === current.id : false;
+      if (aIsCurrent !== bIsCurrent) return aIsCurrent ? -1 : 1;
+      return a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
+    })
+    .map((m) => `${m.provider}/${m.id}`);
+}
+
 // ─── Git helpers for the coder/reviewer loop ───────────────────────────────────────
 
 function runGit(cwd: string, args: string[]): { ok: boolean; stdout: string; error?: string } {
@@ -500,9 +521,9 @@ ${comment.trim()}`
       const parts = prefix.split(/\s+/);
       if (parts.length > 1 && parts[0] === "implement_next_task") {
         const last = parts[parts.length - 1];
-        if (!"local".startsWith(last)) return null;
-        const fullValue = [...parts.slice(0, -1), "local"].join(" ");
-        return [{ value: fullValue, label: "local" }];
+        const matches = ["local", "ask"].filter((v) => v.startsWith(last));
+        if (matches.length === 0) return null;
+        return matches.map((value) => ({ value: [...parts.slice(0, -1), value].join(" "), label: value }));
       }
       const subcommands = ["plan", "task", "implement_next_task"];
       const filtered = subcommands.filter((s) => s.startsWith(prefix));
@@ -679,17 +700,70 @@ ${JSON.stringify(manifest, null, 2)}
           return;
         }
 
-        // "local" flag overrides the subagent's model with the current session's model
+        // Model overrides for the coder/reviewer subagents:
+        // - "ask": prompt the user to pick one model per role (mirrors /model)
+        // - "local": use the current session model for both roles
+        // - (no flag): each role's configured default model applies
         const useLocalModel = subArgs.includes("local");
-        const modelRef = useLocalModel && ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-        if (useLocalModel && !modelRef) {
-          ctx.ui.notify("Could not resolve current session model for 'local' override; falling back to the coder role's default model.", "warning");
+        const useAskModels = subArgs.includes("ask");
+
+        let coderModelRef: string | undefined;
+        let reviewerModelRef: string | undefined;
+
+        if (useAskModels) {
+          if (!ctx.hasUI) {
+            ctx.ui.notify("'ask' requires an interactive session to pick models. Re-run without 'ask' or use 'local'.", "error");
+            return;
+          }
+          const options = modelPickerOptions(ctx);
+          if (options.length === 0) {
+            ctx.ui.notify("No available models to choose from. Configure a provider (e.g. /login) and re-run.", "error");
+            return;
+          }
+
+          const coderChoice = await ctx.ui.select(`Pick the coder model for task ${todoTask.id}`, options);
+          if (!coderChoice) {
+            ctx.ui.notify("Model selection cancelled — nothing spawned. Re-run /workflow implement_next_task ask when ready.", "warning");
+            return;
+          }
+
+          const reviewerChoice = await ctx.ui.select(`Pick the reviewer model for task ${todoTask.id}`, options);
+          if (!reviewerChoice) {
+            ctx.ui.notify("Model selection cancelled — nothing spawned. Re-run /workflow implement_next_task ask when ready.", "warning");
+            return;
+          }
+
+          coderModelRef = coderChoice;
+          reviewerModelRef = reviewerChoice;
+          ctx.ui.notify(`Selected models — coder: ${coderModelRef}, reviewer: ${reviewerModelRef}`, "info");
+        } else if (useLocalModel) {
+          const sessionModelRef = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+          if (!sessionModelRef) {
+            ctx.ui.notify("Could not resolve current session model for 'local' override; falling back to the subagents' default models.", "warning");
+          } else {
+            coderModelRef = sessionModelRef;
+            reviewerModelRef = sessionModelRef;
+          }
         }
+
+        // An existing subagent keeps the model it was spawned with; warn when
+        // that differs from a model override the user explicitly requested.
+        const warnIfReuseIgnoresModelOverride = (role: "coder" | "reviewer", subagentId: string, requestedRef: string | undefined) => {
+          if (!requestedRef) return;
+          const subagent = subagentManager.list().find((s) => s.id === subagentId);
+          if (subagent && subagent.model && subagent.model !== requestedRef) {
+            ctx.ui.notify(
+              `Reusing ${role} subagent ${subagentId} with its existing model ${subagent.model}; requested model ${requestedRef} will not apply. Kill it via /subagents first to force the new model.`,
+              "warning",
+            );
+          }
+        };
 
         ctx.ui.notify(`Next task to implement: ${todoTask.id}`, "info");
 
         let resolvedCoderId = findExistingSubagent("coder");
         if (resolvedCoderId) {
+          warnIfReuseIgnoresModelOverride("coder", resolvedCoderId, coderModelRef);
           ctx.ui.notify(`Reusing existing coder subagent ${resolvedCoderId} for task ${todoTask.id}.`, "info");
         } else {
           const spawnResult = await subagentManager.spawn(
@@ -698,7 +772,7 @@ ${JSON.stringify(manifest, null, 2)}
             ctx.model,
             ctx.thinkingLevel,
             ctx.modelRegistry,
-            modelRef ? { model: modelRef } : undefined,
+            coderModelRef ? { model: coderModelRef } : undefined,
           );
 
           if (!spawnResult.id) {
@@ -707,7 +781,7 @@ ${JSON.stringify(manifest, null, 2)}
           }
 
           resolvedCoderId = spawnResult.id;
-          ctx.ui.notify(`Spawned coder subagent ${resolvedCoderId}${modelRef ? ` (model: ${modelRef})` : ""} for task ${todoTask.id}`, "info");
+          ctx.ui.notify(`Spawned coder subagent ${resolvedCoderId}${coderModelRef ? ` (model: ${coderModelRef})` : ""} for task ${todoTask.id}`, "info");
         }
 
         const instruction = `Implement the following task in this codebase at ${ctx.cwd}.
@@ -717,7 +791,8 @@ Task file: ${taskFilePath}
 
 ${taskContent}
 
-Implement exactly what is described above (Overview, Subtasks, Implementation Details, Acceptance Criteria).`;
+Implement exactly what is described above (Overview, Subtasks, Implementation Details, Acceptance Criteria).
+Do not expand your context with other tasks files.`;
 
         // Don't await the coder's turn here: `send()` only resolves once the
         // subagent's whole turn settles, which can take a long time. Awaiting
@@ -786,6 +861,7 @@ Implement exactly what is described above (Overview, Subtasks, Implementation De
                 const existingReviewer = findExistingSubagent("reviewer");
                 if (existingReviewer) {
                   reviewerId = existingReviewer;
+                  warnIfReuseIgnoresModelOverride("reviewer", reviewerId, reviewerModelRef);
                   ctx.ui.notify(`Reusing existing reviewer subagent ${reviewerId} for task ${todoTask.id}.`, "info");
                 } else {
                   const reviewerSpawn = await subagentManager.spawn(
@@ -794,14 +870,14 @@ Implement exactly what is described above (Overview, Subtasks, Implementation De
                     ctx.model,
                     ctx.thinkingLevel,
                     ctx.modelRegistry,
-                    modelRef ? { model: modelRef } : undefined,
+                    reviewerModelRef ? { model: reviewerModelRef } : undefined,
                   );
                   if (!reviewerSpawn.id) {
                     ctx.ui.notify(`Failed to spawn reviewer subagent for task ${todoTask.id}: ${reviewerSpawn.errorMessage ?? "unknown error"}`, "error");
                     return;
                   }
                   reviewerId = reviewerSpawn.id;
-                  ctx.ui.notify(`Spawned reviewer subagent ${reviewerId}${modelRef ? ` (model: ${modelRef})` : ""} for task ${todoTask.id}`, "info");
+                  ctx.ui.notify(`Spawned reviewer subagent ${reviewerId}${reviewerModelRef ? ` (model: ${reviewerModelRef})` : ""} for task ${todoTask.id}`, "info");
                 }
               }
 

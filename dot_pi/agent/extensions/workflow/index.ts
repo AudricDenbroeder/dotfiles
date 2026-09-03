@@ -601,7 +601,7 @@ Rules:
 - Include technical decisions and code patterns
 - Write clear acceptance criteria (checkboxes)
 - Write all task files in a single batch of tool calls (no reading back)
-- Then create the manifest file at {manifestPath} with this JSON format:
+- Then create the manifest file (TASKS.json) at {manifestPath} with this JSON format:
 
 ${JSON.stringify(manifest, null, 2)}
 
